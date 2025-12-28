@@ -912,6 +912,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         win.alignChildren = ["fill", "top"];
         win.spacing = 10;
         win.margins = 10;
+        win.onResizing = win.onResize = function () { this.layout.resize(); };
 
         // Header
         var header = win.add("group");
@@ -923,7 +924,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         try { title.graphics.font = ScriptUI.newFont("Tahoma", "Bold", 16); } catch (e0) {}
 
         var btnRefresh = header.add("button", undefined, "⚡");
-        btnRefresh.helpTip = "Refresh from current project + active comp/work area";
+        btnRefresh.helpTip = "Refresh project, active comp, and work area frames.";
         btnRefresh.preferredSize = [34, 26];
 
         var btnRQ = header.add("button", undefined, "RQ");
@@ -931,7 +932,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         btnRQ.preferredSize = [34, 26];
 
         var btnSettings = header.add("button", undefined, "⚙");
-        btnSettings.helpTip = "System settings";
+        btnSettings.helpTip = "System settings and paths.";
         btnSettings.preferredSize = [34, 26];
 
         // Target panel
@@ -940,6 +941,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         pTarget.alignChildren = ["fill", "top"];
         pTarget.spacing = 8;
         pTarget.margins = 10;
+        pTarget.alignment = ["fill", "top"];
 
         // Project row
         var gProj = pTarget.add("group");
@@ -951,9 +953,11 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         var etProj = gProj.add("edittext", undefined, "");
         etProj.characters = 38;
         etProj.enabled = false;
+        etProj.helpTip = "Current project path (read-only).";
 
         var bProj = gProj.add("button", undefined, "…");
         bProj.preferredSize = [30, 24];
+        bProj.helpTip = "Pick a project file (.aep).";
 
         // Target row
         var gTgt = pTarget.add("group");
@@ -963,12 +967,15 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
 
         var ddTgt = gTgt.add("dropdownlist", undefined, ["Comp Name", "RQ Index"]);
         ddTgt.preferredSize = [110, 24];
+        ddTgt.helpTip = "Choose comp name or Render Queue index.";
 
         var etTgt = gTgt.add("edittext", undefined, "");
         etTgt.characters = 26;
+        etTgt.helpTip = "Comp name or RQ index (1-based).";
 
         var bPick = gTgt.add("button", undefined, "Pick Active");
         bPick.preferredSize = [90, 24];
+        bPick.helpTip = "Use the active comp from the viewer.";
 
         // Output row
         var gOut = pTarget.add("group");
@@ -980,9 +987,11 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         var etOut = gOut.add("edittext", undefined, "");
         etOut.characters = 38;
         etOut.enabled = false;
+        etOut.helpTip = "Output path from the target comp or Render Queue item.";
 
         var bOut = gOut.add("button", undefined, "…");
         bOut.preferredSize = [30, 24];
+        bOut.helpTip = "Pick output path/pattern.";
 
         // Templates row (small + optional)
         var gTpl = pTarget.add("group");
@@ -1007,6 +1016,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         pRQ.alignChildren = ["fill", "top"];
         pRQ.spacing = 6;
         pRQ.margins = 10;
+        pRQ.alignment = ["fill", "top"];
 
         var gRQTop = pRQ.add("group");
         gRQTop.orientation = "row";
@@ -1015,15 +1025,20 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
 
         var cbOnlyQueued = gRQTop.add("checkbox", undefined, "Only QUEUED");
         cbOnlyQueued.value = true;
+        cbOnlyQueued.helpTip = "Filter list to Render Queue items with status QUEUED.";
 
         var bRQRefresh = gRQTop.add("button", undefined, "Refresh");
         bRQRefresh.preferredSize = [80, 24];
+        bRQRefresh.helpTip = "Reload Render Queue list.";
 
         var bUseSel = gRQTop.add("button", undefined, "Use Selected");
         bUseSel.preferredSize = [100, 24];
+        bUseSel.helpTip = "Apply selected Render Queue item to target/output.";
 
         var lbRQ = pRQ.add("listbox", undefined, [], { multiselect: false });
         lbRQ.preferredSize = [0, 120];
+        lbRQ.alignment = ["fill", "fill"];
+        lbRQ.helpTip = "Render Queue items from the current project.";
 
         // Scope panel
         var pScope = win.add("panel", undefined, "Execution Scope");
@@ -1031,6 +1046,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         pScope.alignChildren = ["fill", "top"];
         pScope.spacing = 8;
         pScope.margins = 10;
+        pScope.alignment = ["fill", "top"];
 
         var gFrames = pScope.add("group");
         gFrames.orientation = "row";
@@ -1039,12 +1055,15 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
 
         var ddFrames = gFrames.add("dropdownlist", undefined, ["Framespec", "Start / End"]);
         ddFrames.preferredSize = [110, 24];
+        ddFrames.helpTip = "Framespec uses a single range string. Start/End uses two fields.";
 
         var etF1 = gFrames.add("edittext", undefined, "");
         etF1.characters = 18;
+        etF1.helpTip = "Framespec (e.g. 1-100) or Start frame.";
 
         var etF2 = gFrames.add("edittext", undefined, "");
         etF2.characters = 10;
+        etF2.helpTip = "End frame (used in Start/End mode).";
 
         // Chunk row (compact)
         var gChunk = pScope.add("group");
@@ -1073,13 +1092,16 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         gPerf.add("statictext", undefined, "Procs:");
         var etProcs = gPerf.add("edittext", undefined, "12");
         etProcs.characters = 4;
+        etProcs.helpTip = "Max concurrent aerender processes.";
 
         gPerf.add("statictext", undefined, "RAM/GB:");
         var etRam = gPerf.add("edittext", undefined, "16");
         etRam.characters = 4;
+        etRam.helpTip = "Estimated GB RAM per process.";
 
         var cbAuto = gPerf.add("checkbox", undefined, "Auto");
         cbAuto.value = true;
+        cbAuto.helpTip = "Auto-calc concurrency based on system resources.";
 
         // Action row
         var gAct = win.add("group");
@@ -1088,6 +1110,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         gAct.spacing = 12;
 
         var cbDry = gAct.add("checkbox", undefined, "Dry Run");
+        cbDry.helpTip = "Show the command without launching.";
         var cbBg = gAct.add("checkbox", undefined, "Background");
         cbBg.value = true;
         cbBg.enabled = false;
@@ -1104,9 +1127,11 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
 
         var bLog = gAct.add("button", undefined, "Open Log");
         bLog.preferredSize = [90, 28];
+        bLog.helpTip = "Open last_run.log in your OS.";
 
         var bRun = gAct.add("button", undefined, "INITIALIZE RUNNER");
         bRun.preferredSize = [220, 40];
+        bRun.helpTip = "Launch the Python runner in the background.";
 
         // Console panel
         var pConsole = win.add("panel", undefined, "Runner Console");
@@ -1114,6 +1139,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         pConsole.alignChildren = ["fill", "top"];
         pConsole.spacing = 6;
         pConsole.margins = 10;
+        pConsole.alignment = ["fill", "fill"];
 
         var gCStatus = pConsole.add("group");
         gCStatus.orientation = "row";
@@ -1130,6 +1156,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
 
         var pb = pConsole.add("progressbar", undefined, 0, 100);
         pb.preferredSize = [0, 14];
+        pb.alignment = ["fill", "center"];
 
         var gCBtns = pConsole.add("group");
         gCBtns.orientation = "row";
@@ -1147,10 +1174,16 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         bStop.preferredSize = [80, 24];
         bRevealLog.preferredSize = [90, 24];
         bClearView.preferredSize = [90, 24];
+        bPause.helpTip = "Pause the runner and child aerenders.";
+        bResume.helpTip = "Resume paused processes.";
+        bStop.helpTip = "Stop runner and child aerenders.";
+        bRevealLog.helpTip = "Reveal last_run.log in Finder/Explorer.";
+        bClearView.helpTip = "Clear the console view.";
 
         var etConsole = pConsole.add("edittext", undefined, "", { multiline: true, scrolling: true, readonly: true });
         etConsole.preferredSize = [0, 220];
         etConsole.helpTip = "Live tail of last_run.log";
+        etConsole.alignment = ["fill", "fill"];
 
         // Stash refs
         this.ui = {
