@@ -853,6 +853,12 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
     if single_file_concat_mode and concurrency > 1:
         # Keep segments in a subfolder so the background offloader (if enabled) doesn't
         # try to copy partial segment files.
+        try:
+            if child_pid_file is not None and Path(child_pid_file).exists():
+                Path(child_pid_file).unlink()
+        except Exception:
+            pass
+
         if use_scratch:
             segment_dir = local_scratch_dir / "_segments"
         else:
@@ -915,6 +921,92 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
 
     # Spawn children
     children: List[ChildProc] = []
+
+    # Track all child/descendant PIDs (including aerendercore on macOS) so external stop logic can
+    # terminate the full render tree reliably.
+    child_pid_file: Optional[Path] = None
+    try:
+        if getattr(args, "pid_file", None):
+            child_pid_file = Path(args.pid_file).with_name("children_pids.txt")
+    except Exception:
+        child_pid_file = None
+
+    pid_lock = threading.Lock()
+    pid_set = set()
+
+    def _write_child_pid_file() -> None:
+        if not child_pid_file:
+            return
+        try:
+            child_pid_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(child_pid_file) + ".tmp")
+            lines = []
+            for p in sorted(pid_set):
+                try:
+                    p_int = int(p)
+                    if p_int > 1:
+                        lines.append("pid=%d" % p_int)
+                except Exception:
+                    pass
+            tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+            os.replace(str(tmp), str(child_pid_file))
+        except Exception:
+            pass
+
+    def _add_pid(pid: int) -> None:
+        try:
+            pid_int = int(pid)
+        except Exception:
+            return
+        if pid_int <= 1:
+            return
+        with pid_lock:
+            if pid_int in pid_set:
+                return
+            pid_set.add(pid_int)
+        _write_child_pid_file()
+
+    def _capture_descendants_for_pid(pid: int, max_wait_sec: float = 1.5) -> None:
+        if psutil is None:
+            return
+        try:
+            proc = psutil.Process(int(pid))
+        except Exception:
+            return
+        _add_pid(proc.pid)
+
+        end = time.time() + float(max_wait_sec)
+        while time.time() < end:
+            kids = []
+            try:
+                kids = proc.children(recursive=True)
+            except Exception:
+                kids = []
+            for k in kids:
+                try:
+                    _add_pid(k.pid)
+                except Exception:
+                    pass
+            # Short polling window to catch aerendercore shortly after spawn
+            time.sleep(0.08)
+
+    def _refresh_descendants_once() -> None:
+        if psutil is None:
+            return
+        for ch in children:
+            try:
+                if ch.popen.poll() is not None:
+                    continue
+                p = psutil.Process(int(ch.popen.pid))
+                _add_pid(p.pid)
+                try:
+                    for k in p.children(recursive=True):
+                        _add_pid(k.pid)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
     out_q: queue.Queue = queue.Queue()
     stop_children_event = threading.Event()
 
@@ -981,6 +1073,14 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
         child = ChildProc(pop, (s, e), aff, ps_proc, time.time())
         children.append(child)
 
+        # Best-effort: capture descendant PIDs (e.g., aerendercore) shortly after spawn.
+        try:
+            if child_pid_file is not None and psutil is not None:
+                threading.Thread(target=_capture_descendants_for_pid, args=(pop.pid, 1.5), daemon=True).start()
+        except Exception:
+            pass
+
+
         # log streaming threads
         if pop.stdout:
             threading.Thread(target=stream_reader, args=(pop.pid, pop.stdout, out_q, "STDOUT"), daemon=True).start()
@@ -1002,6 +1102,19 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
                 logger.info(f"[{pid} {tag}] {line}")
         except queue.Empty:
             pass
+
+        # Refresh descendant PIDs periodically so aerendercore is captured even if it spawns later.
+        # This is best-effort and never blocks the render.
+        try:
+            if child_pid_file is not None and psutil is not None:
+                if 'last_pid_refresh' not in locals():
+                    last_pid_refresh = 0.0
+                if (time.time() - float(last_pid_refresh)) > 2.0:
+                    last_pid_refresh = time.time()
+                    _refresh_descendants_once()
+        except Exception:
+            pass
+
 
         # Periodic silent-child warnings
         now = time.time()

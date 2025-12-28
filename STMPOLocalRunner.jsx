@@ -581,17 +581,17 @@ STMPO_Model.prototype.installOrUpdateRunnerFromBundle = function () {
     try {
         var scriptFolder = new File($.fileName).parent;
         var srcRunner = new File(scriptFolder.fsName + "/stmpo_local_render.py");
+        var srcStopper = new File(scriptFolder.fsName + "/stmpo_stop.py");
         var srcPkg = new Folder(scriptFolder.fsName + "/stmpo");
-
-        if (!srcRunner.exists || !srcPkg.exists) {
+        if (!srcRunner.exists || !srcStopper.exists || !srcPkg.exists) {
             return false;
         }
 
         Utils.ensureFolder(this.prefsFolder);
 
         var dstRunner = new File(this.prefsFolder.fsName + "/stmpo_local_render.py");
+        var dstStopper = new File(this.prefsFolder.fsName + "/stmpo_stop.py");
         var dstPkg = new Folder(this.prefsFolder.fsName + "/stmpo");
-
         var stamp = (new Date()).getTime();
         var tmpRoot = new Folder(this.prefsFolder.fsName + "/__stmpo_install_tmp_" + stamp);
 
@@ -601,15 +601,16 @@ STMPO_Model.prototype.installOrUpdateRunnerFromBundle = function () {
 
         // Stage
         var okStageRunner = Utils.copyFile(srcRunner, tmpRoot.fsName + "/stmpo_local_render.py");
+        var okStageStopper = Utils.copyFile(srcStopper, tmpRoot.fsName + "/stmpo_stop.py");
         var okStagePkg = Utils.copyFolderRecursive(srcPkg, tmpRoot.fsName + "/stmpo");
-
-        if (!okStageRunner || !okStagePkg) {
+        if (!okStageRunner || !okStageStopper || !okStagePkg) {
             try { Utils.removeTree(tmpRoot); } catch (e1) {}
             return false;
         }
 
         // Move old aside (best-effort), but delete after successful install.
         var oldRunner = null;
+        var oldStopper = null;
         var oldPkg = null;
 
         try {
@@ -620,6 +621,16 @@ STMPO_Model.prototype.installOrUpdateRunnerFromBundle = function () {
             }
         } catch (e2) {
             try { Utils.removeTree(dstRunner); } catch (e3) {}
+        }
+
+        try {
+            if (dstStopper.exists) {
+                var oldStopperName = "stmpo_stop.py__old__" + stamp;
+                dstStopper.rename(oldStopperName);
+                oldStopper = new File(this.prefsFolder.fsName + "/" + oldStopperName);
+            }
+        } catch (e2b) {
+            try { if (dstStopper.exists) dstStopper.remove(); } catch (e3b) {}
         }
 
         try {
@@ -634,14 +645,15 @@ STMPO_Model.prototype.installOrUpdateRunnerFromBundle = function () {
 
         // Install into final locations
         var okRunner = Utils.copyFile(tmpRoot.fsName + "/stmpo_local_render.py", dstRunner.fsName);
+        var okStopper = Utils.copyFile(tmpRoot.fsName + "/stmpo_stop.py", dstStopper.fsName);
         var okPkg = Utils.copyFolderRecursive(tmpRoot.fsName + "/stmpo", dstPkg.fsName);
-
         // Cleanup temp
         try { Utils.removeTree(tmpRoot); } catch (e6) {}
 
-        if (okRunner && okPkg) {
+        if (okRunner && okStopper && okPkg) {
             // Best-effort cleanup of backups
             try { if (oldRunner && oldRunner.exists) oldRunner.remove(); } catch (e7) {}
+            try { if (oldStopper && oldStopper.exists) oldStopper.remove(); } catch (e7b) {}
             try { if (oldPkg && oldPkg.exists) Utils.removeTree(oldPkg); } catch (e8) {}
 
             this.state.runner_path = dstRunner.fsName;
@@ -1672,6 +1684,44 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
             var logFile = this.model.logFile;
 
             this._setConsole("Stopping…", null, "(sent stop request)\nLog: " + logFile.fsName);
+
+            // Preferred: use Python-based stopper (kills aerender + aerendercore reliably via psutil)
+            var s = this.model.state;
+            var py = Utils.detectPython3Command(s.python_path);
+            var stopPy = new File(prefs.fsName + "/stmpo_stop.py");
+            var childPidFile = new File(prefs.fsName + "/children_pids.txt");
+
+            if (py && stopPy.exists) {
+                var baseCmd = py + " " + Utils.q(stopPy.fsName);
+                baseCmd += " --pid_file " + Utils.q(pidFile.fsName);
+                baseCmd += " --child_pid_file " + Utils.q(childPidFile.fsName);
+                baseCmd += " --log_file " + Utils.q(logFile.fsName);
+
+                try {
+                    if (Utils.isWindows()) {
+                        var cmdFile = new File(prefs.fsName + "/stop_last.cmd");
+                        var body = "";
+                        body += "@echo off\r\n";
+                        body += "setlocal EnableExtensions EnableDelayedExpansion\r\n";
+                        body += baseCmd + "\r\n";
+                        body += "endlocal\r\n";
+                        Utils.writeFile(cmdFile, body);
+
+                        // Detached
+                        system.callSystem('cmd.exe /c start "" /b ""' + cmdFile.fsName + '""');
+                    } else {
+                        // Detached
+                        system.callSystem('/bin/bash -lc ' + Utils.q("nohup " + baseCmd + " >/dev/null 2>&1 &"));
+                    }
+                } catch (eStopLaunch) {
+                    // Fall back to legacy below
+                }
+
+                // Keep monitoring briefly so the console reflects progress
+                try { this._monitorStop(); } catch (eMon0) {}
+                return;
+            }
+
 
             if (Utils.isWindows()) {
                 var stopCmd = new File(prefs.fsName + "/stop_last.cmd");
