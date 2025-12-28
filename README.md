@@ -38,7 +38,9 @@ python stmpo_local_render.py ^
 ```
 
 - `--concurrency 0` = **auto** (based on CPU/RAM)
-- If your `--output` is a **single file** (mov/mp4/wav/etc), concurrency is automatically forced to **1**.
+- If your `--output` is a **single file** (e.g., `.mov`/`.mp4`), STMPO can still run **concurrent** `aerender` children by rendering **per-range segments** and then **stitching** them at the end with **ffmpeg**.
+  - Requires `ffmpeg` on your `PATH`, or set the `FFMPEG` environment variable to an explicit executable path.
+  - Stitching tries **stream copy** first (`-c copy`). If that fails, it will **re-encode** as a fallback.
 
 ### 3) Mimic “task chunking” (Deadline-style)
 

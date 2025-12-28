@@ -119,6 +119,230 @@ def setup_logging(log_file: Optional[str]) -> logging.Logger:
     return logger
 
 
+def find_ffmpeg() -> Optional[str]:
+    """Return an ffmpeg executable path if available, else None.
+
+    Order:
+      1) $FFMPEG environment var (explicit path)
+      2) ffmpeg on PATH
+    """
+    env = os.environ.get("FFMPEG")
+    if env:
+        p = Path(env).expanduser()
+        if p.exists():
+            return str(p)
+    return shutil.which("ffmpeg")
+
+
+def _ffconcat_escape_path(p: Path) -> str:
+    # concat demuxer list syntax uses single quotes; escape single quotes if present.
+    s = str(p)
+    return s.replace("'", "'\\''")
+
+
+def ffmpeg_concat_segments(
+    *,
+    ffmpeg_path: str,
+    segments: List[Path],
+    output_file: Path,
+    work_dir: Path,
+    log: logging.Logger,
+    allow_reencode: bool = True,
+) -> bool:
+    """Concatenate segment movies using ffmpeg.
+
+    - First attempts stream copy (fast, no quality loss)
+    - If stream-copy fails and allow_reencode=True, retries with a sensible re-encode
+      based on output extension.
+    """
+
+    if not segments:
+        log.error("ffmpeg_concat_segments: no segments provided")
+        return False
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    list_file = work_dir / "concat_list.txt"
+    try:
+        with open(list_file, "w", encoding="utf-8") as f:
+            f.write("ffconcat version 1.0\n")
+            for seg in segments:
+                f.write(f"file '{_ffconcat_escape_path(seg)}'\n")
+    except Exception as e:
+        log.error("Failed to write ffmpeg concat list: %s", e)
+        return False
+
+    def _run(cmd: List[str]) -> Tuple[bool, str]:
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(work_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            out = proc.stdout or ""
+            ok = proc.returncode == 0
+            if not ok:
+                log.warning("ffmpeg failed (rc=%s). Output:\n%s", proc.returncode, out)
+            else:
+                log.info("ffmpeg ok. Output:\n%s", out)
+            return ok, out
+        except Exception as e:
+            log.error("ffmpeg invocation error: %s", e)
+            return False, str(e)
+
+    # 1) stream copy
+    copy_cmd = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_file),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+    ]
+    # Faststart helps for mov/mp4.
+    if output_file.suffix.lower() in (".mov", ".mp4"):
+        copy_cmd += ["-movflags", "+faststart"]
+    copy_cmd += [str(output_file)]
+
+    log.info("ffmpeg concat (stream-copy): %s", " ".join(copy_cmd))
+    ok, _ = _run(copy_cmd)
+    if ok:
+        return True
+
+    if not allow_reencode:
+        return False
+
+    # 2) re-encode fallback
+    ext = output_file.suffix.lower()
+    if ext == ".mov":
+        # Reasonable ProRes HQ fallback.
+        vcodec = ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"]
+        # Try to copy audio first; if that fails we'll re-encode audio too.
+        acodec_primary = ["-c:a", "copy"]
+        acodec_fallback = ["-c:a", "pcm_s16le"]
+    elif ext == ".mp4":
+        vcodec = ["-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p"]
+        acodec_primary = ["-c:a", "copy"]
+        acodec_fallback = ["-c:a", "aac", "-b:a", "320k"]
+    else:
+        # Generic safe defaults.
+        vcodec = ["-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p"]
+        acodec_primary = ["-c:a", "copy"]
+        acodec_fallback = ["-c:a", "aac", "-b:a", "320k"]
+
+    reenc_cmd = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_file),
+        "-map",
+        "0",
+    ] + vcodec + acodec_primary
+    if output_file.suffix.lower() in (".mov", ".mp4"):
+        reenc_cmd += ["-movflags", "+faststart"]
+    reenc_cmd += [str(output_file)]
+
+    log.info("ffmpeg concat (re-encode): %s", " ".join(reenc_cmd))
+    ok, _ = _run(reenc_cmd)
+    if ok:
+        return True
+
+    # 3) re-encode audio too
+    reenc_cmd2 = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_file),
+        "-map",
+        "0",
+    ] + vcodec + acodec_fallback
+    if output_file.suffix.lower() in (".mov", ".mp4"):
+        reenc_cmd2 += ["-movflags", "+faststart"]
+    reenc_cmd2 += [str(output_file)]
+
+    log.info("ffmpeg concat (re-encode v+a): %s", " ".join(reenc_cmd2))
+    ok, _ = _run(reenc_cmd2)
+    return ok
+
+
+def _popen_kwargs_for_child() -> dict:
+    """Platform-specific kwargs so we can reliably terminate aerender and its child processes."""
+    if os.name == "nt":
+        # CREATE_NEW_PROCESS_GROUP lets us deliver CTRL_BREAK_EVENT / terminate without killing the parent process.
+        # It's defined only on Windows.
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    # POSIX: start a new session so we can kill the whole process group (aerender can spawn helpers).
+    return {"start_new_session": True}
+
+
+def _terminate_process_tree(proc: subprocess.Popen | None, logger: logging.Logger, grace_sec: float = 5.0) -> None:
+    """Best-effort graceful terminate, then hard-kill (including process group on POSIX)."""
+    if not proc:
+        return
+    if proc.poll() is not None:
+        return
+
+    # Graceful
+    try:
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                logger.info("Sent SIGTERM to process group pgid=%s.", proc.pid)
+            except Exception:
+                proc.terminate()
+        else:
+            proc.terminate()
+    except Exception:
+        logger.exception("Failed to send graceful termination to child.")
+        return
+
+    t0 = time.time()
+    while time.time() - t0 < grace_sec:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.2)
+
+    # Hard kill
+    try:
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+                logger.warning("Sent SIGKILL to process group pgid=%s.", proc.pid)
+            except Exception:
+                proc.kill()
+        else:
+            # Try to kill the whole tree on Windows.
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except Exception:
+                proc.kill()
+    except Exception:
+        logger.exception("Failed to hard-kill child.")
+
+
 def load_env_overrides(env_file: Optional[str]) -> Dict[str, str]:
     if not env_file:
         return {}
@@ -569,13 +793,38 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
     if requested < 0:
         requested = 0
 
-    if total_frames > 1 and not output_is_seq and requested not in (0, 1):
-        logger.warning("Single-file output detected (%s). Forcing concurrency=1 to avoid concurrent writes/hangs.", final_output_path)
-        requested = 1
-
+    # Compute concurrency (auto or user-specified)
     concurrency = requested if requested >= 1 else auto_concurrency(args, logger)
     if total_frames <= 1:
         concurrency = 1
+
+    # IMPORTANT: aeRender cannot safely have multiple processes writing to the *same single* output file.
+    # However, we *can* parallelize by rendering per-range segment files and stitching at the end with ffmpeg.
+    # This is only attempted if:
+    #   - output is a single file (NOT an image sequence)
+    #   - total_frames > 1
+    #   - concurrency > 1
+    #   - ffmpeg is available
+    single_file_concat_mode = (total_frames > 1 and not output_is_seq and concurrency > 1)
+    ffmpeg_path: Optional[str] = None
+    if single_file_concat_mode:
+        ffmpeg_path = find_ffmpeg()
+        if not ffmpeg_path:
+            logger.warning(
+                "Single-file output detected (%s) with concurrency=%s, but ffmpeg was not found. "
+                "Falling back to concurrency=1. (Install ffmpeg or set $FFMPEG to enable segment stitching.)",
+                final_output_path,
+                concurrency,
+            )
+            single_file_concat_mode = False
+            concurrency = 1
+        else:
+            logger.info(
+                "Single-file output detected (%s). Using segmented renders (concurrency=%s) + ffmpeg stitching (%s).",
+                final_output_path,
+                concurrency,
+                ffmpeg_path,
+            )
 
     ranges = split_ranges(args.start, args.end, concurrency)
     logger.info("Frame ranges: %s", ranges)
@@ -596,6 +845,33 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
 
         if args.stage_project:
             args.project = stage_project_to_local(args.project, local_scratch_dir, logger)
+
+    # If we're chunking a *single-file* output, render each chunk to its own temp file,
+    # then stitch into local_output_path using ffmpeg.
+    segment_outputs: List[Path] = []
+    segment_dir: Optional[Path] = None
+    if single_file_concat_mode and concurrency > 1:
+        # Keep segments in a subfolder so the background offloader (if enabled) doesn't
+        # try to copy partial segment files.
+        if use_scratch:
+            segment_dir = local_scratch_dir / "_segments"
+        else:
+            segment_dir = final_output_path.parent / f".stmpo_segments_{run_id}"
+        segment_dir.mkdir(parents=True, exist_ok=True)
+
+        ext = final_output_path.suffix or ""
+        base = final_output_path.stem or "render"
+        for idx, (s, e) in enumerate(ranges, start=1):
+            seg_name = f"{base}__part_{idx:03d}_{s}-{e}{ext}"
+            segment_outputs.append(segment_dir / seg_name)
+        # Avoid accidentally picking up stale segments from a previous failed run.
+        for seg in segment_outputs:
+            try:
+                if seg.exists():
+                    seg.unlink()
+            except Exception as ex:
+                logger.warning("Could not remove existing segment %s: %s", seg, ex)
+        logger.info("Segment render mode: %s segment(s) -> %s", len(segment_outputs), segment_dir)
 
     # Offloader
     stop_offload_event = threading.Event()
@@ -629,7 +905,8 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
     # Dry run: print commands and exit
     if args.dry_run:
         for i, (s, e) in enumerate(ranges):
-            cmd = build_aerender_cmd(args, s, e, str(local_output_path))
+            child_out = segment_outputs[i] if segment_outputs else local_output_path
+            cmd = build_aerender_cmd(args, s, e, str(child_out))
             logger.info("DRY RUN child[%s]: %s", i, " ".join(cmd))
         stop_offload_event.set()
         if offloader_thread:
@@ -645,8 +922,7 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
         stop_children_event.set()
         for ch in children:
             try:
-                if ch.popen.poll() is None:
-                    ch.popen.terminate()
+                _terminate_process_tree(ch.popen, logger, grace_sec=2.0)
             except Exception:
                 pass
         stop_offload_event.set()
@@ -674,7 +950,8 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
         if i > 0 and args.spawn_delay > 0:
             time.sleep(args.spawn_delay)
 
-        cmd = build_aerender_cmd(args, s, e, str(local_output_path))
+        child_out = segment_outputs[i] if segment_outputs else local_output_path
+        cmd = build_aerender_cmd(args, s, e, str(child_out))
         logger.info("Launching child[%s] frames=%s-%s", i, s, e)
         logger.info("CMD: %s", " ".join(cmd))
 
@@ -686,6 +963,7 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
             bufsize=1,
             universal_newlines=True,
             env=child_env,
+        **_popen_kwargs_for_child(),
         )
 
         # Emit a PID-bearing line so UIs can map ranges<->pids.
@@ -765,6 +1043,38 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
             time.sleep(0.15)
 
     # Stop offloader and finalize
+    # If we rendered multiple segments to support concurrent rendering of a single-file output,
+    # stitch the segments into the final output file using ffmpeg.
+    if segment_outputs:
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            logger.error(
+                "Concurrency produced %d segments, but ffmpeg was not found. "
+                "Install ffmpeg or set $FFMPEG to its path, then re-run.",
+                len(segment_outputs),
+            )
+            return 2
+
+        # Sanity check: segments exist
+        missing = [p for p in segment_outputs if not p.exists()]
+        if missing:
+            logger.error("Missing %d/%d segment file(s). Example: %s", len(missing), len(segment_outputs), missing[0])
+            logger.error("Leaving scratch directory intact for debugging.")
+            return 2
+
+        logger.info("Stitching %d segment(s) -> %s", len(segment_outputs), local_output_path)
+        ok = ffmpeg_concat_segments(ffmpeg, segment_outputs, local_output_path, logger)
+        if not ok:
+            logger.error("FFmpeg stitch failed. Leaving segments for debugging.")
+            return 2
+
+        # Clean up segments directory when possible (scratch cleanup below will remove it anyway).
+        try:
+            seg_dir = segment_outputs[0].parent
+            shutil.rmtree(str(seg_dir), ignore_errors=True)
+        except Exception:
+            pass
+
     stop_offload_event.set()
     if offloader_thread:
         offloader_thread.join(timeout=5.0)
@@ -786,7 +1096,10 @@ def run_orchestrator(args: argparse.Namespace, logger: logging.Logger, resolve_a
         except Exception:
             pass
 
-    rc = 1 if failures else 0
+    if stop_children_event.is_set() and not failures:
+        rc = 130
+    else:
+        rc = 1 if failures else 0
     logger.info("Run complete rc=%s", rc)
     return rc
 

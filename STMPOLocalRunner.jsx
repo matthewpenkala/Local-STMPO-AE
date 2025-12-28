@@ -3,7 +3,7 @@ STMPO Local Runner — Hybrid (UI: v2.2.0, Logic: v2.3.0+)
 --------------------------------------------------------
 Architect: Matthew Penkala
 Assistant: merge + hardening
-Version: 2.4.2
+Version: 2.4.3 (v8)
 
 Goal:
 - Keep the clean, simple, integrated UI/flow from STMPOLocalRunner.jsx (v2.2.x)
@@ -52,6 +52,66 @@ Install (dockable panel):
             return true;
         } catch (e) { return false; }
     };
+
+Utils.copyFile = function (srcPath, dstPath) {
+    try {
+        var src = (srcPath instanceof File) ? srcPath : new File(srcPath);
+        if (!src.exists) return false;
+        var dst = (dstPath instanceof File) ? dstPath : new File(dstPath);
+        Utils.ensureFolder(dst.parent);
+        if (dst.exists) { try { dst.remove(); } catch (eRm) {} }
+        return src.copy(dst.fsName);
+    } catch (e) {
+        return false;
+    }
+};
+
+Utils.copyFolderRecursive = function (srcFolderPath, dstFolderPath) {
+    try {
+        var src = (srcFolderPath instanceof Folder) ? srcFolderPath : new Folder(srcFolderPath);
+        if (!src.exists) return false;
+        var dst = (dstFolderPath instanceof Folder) ? dstFolderPath : new Folder(dstFolderPath);
+        Utils.ensureFolder(dst);
+
+        var items = src.getFiles();
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i];
+            if (it instanceof Folder) {
+                Utils.copyFolderRecursive(it.fsName, dst.fsName + "/" + it.name);
+            } else {
+                Utils.copyFile(it.fsName, dst.fsName + "/" + it.name);
+            }
+        }
+        return true;
+    } catch (e) {
+        return false;
+    }
+};
+
+// Recursively deletes a File or Folder tree.
+// NOTE: Folder.remove() only works on empty folders, so we must clear children first.
+Utils.removeTree = function (fileOrFolder) {
+    try {
+        var f = fileOrFolder;
+        if (!f) return true;
+        if (!f.exists) return true;
+
+        if (f instanceof File) {
+            return f.remove();
+        }
+
+        if (f instanceof Folder) {
+            var kids = f.getFiles();
+            for (var i = 0; i < kids.length; i++) {
+                Utils.removeTree(kids[i]);
+            }
+            return f.remove();
+        }
+        return false;
+    } catch (e) {
+        return false;
+    }
+};
 
     Utils.readFile = function (fileObjOrPath) {
         try {
@@ -383,7 +443,7 @@ Install (dockable panel):
             concurrency_mode: "auto", // "auto" | "fixed"
             max_concurrency: "12",
             ram_per_process_gb: "16",
-            disable_mfr: false,
+            disable_mfr: true,
 
             // System / Paths
             runner_path: "",
@@ -447,6 +507,14 @@ Install (dockable panel):
 
         this._applyLoadedObject(obj);
 
+        // Safety: hidden template overrides have caused unexpected codec changes in aerender.
+        // Default to using the Render Queue item's settings unless the user explicitly re-enables overrides.
+        this.state.rs_template = "";
+        this.state.om_template = "";
+
+        // Prefer the runner bundled alongside this panel (keeps UI + Python code in sync).
+        this.findRunnerNearScript();
+
         // Auto-detect current project if empty
         try {
             if (!this.state.project_path && app.project && app.project.file) {
@@ -485,6 +553,88 @@ Install (dockable panel):
             }
         }
     };
+
+STMPO_Model.prototype.installOrUpdateRunnerFromBundle = function () {
+    // Copies the Python runner + package that ship alongside this .jsx into the prefs folder,
+    // so the UI and Python code stay in sync. Uses a temp staging folder so partial installs
+    // don’t leave the prefs folder in a mixed state.
+    try {
+        var scriptFolder = new File($.fileName).parent;
+        var srcRunner = new File(scriptFolder.fsName + "/stmpo_local_render.py");
+        var srcPkg = new Folder(scriptFolder.fsName + "/stmpo");
+
+        if (!srcRunner.exists || !srcPkg.exists) {
+            return false;
+        }
+
+        Utils.ensureFolder(this.prefsFolder);
+
+        var dstRunner = new File(this.prefsFolder.fsName + "/stmpo_local_render.py");
+        var dstPkg = new Folder(this.prefsFolder.fsName + "/stmpo");
+
+        var stamp = (new Date()).getTime();
+        var tmpRoot = new Folder(this.prefsFolder.fsName + "/__stmpo_install_tmp_" + stamp);
+
+        // Fresh temp root
+        try { Utils.removeTree(tmpRoot); } catch (e0) {}
+        Utils.ensureFolder(tmpRoot);
+
+        // Stage
+        var okStageRunner = Utils.copyFile(srcRunner, tmpRoot.fsName + "/stmpo_local_render.py");
+        var okStagePkg = Utils.copyFolderRecursive(srcPkg, tmpRoot.fsName + "/stmpo");
+
+        if (!okStageRunner || !okStagePkg) {
+            try { Utils.removeTree(tmpRoot); } catch (e1) {}
+            return false;
+        }
+
+        // Move old aside (best-effort), but delete after successful install.
+        var oldRunner = null;
+        var oldPkg = null;
+
+        try {
+            if (dstRunner.exists) {
+                var oldRunnerName = "stmpo_local_render.py__old__" + stamp;
+                dstRunner.rename(oldRunnerName);
+                oldRunner = new File(this.prefsFolder.fsName + "/" + oldRunnerName);
+            }
+        } catch (e2) {
+            try { Utils.removeTree(dstRunner); } catch (e3) {}
+        }
+
+        try {
+            if (dstPkg.exists) {
+                var oldPkgName = "stmpo__old__" + stamp;
+                dstPkg.rename(oldPkgName);
+                oldPkg = new Folder(this.prefsFolder.fsName + "/" + oldPkgName);
+            }
+        } catch (e4) {
+            try { Utils.removeTree(dstPkg); } catch (e5) {}
+        }
+
+        // Install into final locations
+        var okRunner = Utils.copyFile(tmpRoot.fsName + "/stmpo_local_render.py", dstRunner.fsName);
+        var okPkg = Utils.copyFolderRecursive(tmpRoot.fsName + "/stmpo", dstPkg.fsName);
+
+        // Cleanup temp
+        try { Utils.removeTree(tmpRoot); } catch (e6) {}
+
+        if (okRunner && okPkg) {
+            // Best-effort cleanup of backups
+            try { if (oldRunner && oldRunner.exists) oldRunner.remove(); } catch (e7) {}
+            try { if (oldPkg && oldPkg.exists) Utils.removeTree(oldPkg); } catch (e8) {}
+
+            this.state.runner_path = dstRunner.fsName;
+            this.save();
+            return true;
+        }
+
+        return false;
+    } catch (e) {
+        return false;
+    }
+};
+
 
     // -------------------------------------------------------------------------
     // Render Queue parsing (Queued items + timespan -> display frames)
@@ -602,11 +752,13 @@ Install (dockable panel):
                 var om = item.outputModule(1);
                 if (om && om.file) s.output_path = om.file.fsName;
                 // Capture the actual Output Module template name currently applied.
-                try { if (om && om.name) s.om_template = String(om.name); } catch (eOmName) {}
+                /* try { if (om && om.name) s.om_template = String(om.name); } catch (eOmName) {} */
+            // disabled: use RQ settings by default
             } catch (e0) {}
 
             // Capture the current Render Settings template name if available.
-            try { if (item && item.renderSettings) s.rs_template = String(item.renderSettings); } catch (eRsName) {}
+            /* try { if (item && item.renderSettings) s.rs_template = String(item.renderSettings); } catch (eRsName) {} */
+            // disabled: use RQ settings by default
 
             var row = {
                 rqIndex: rqIndex,
@@ -1346,7 +1498,13 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         var rcMatch = tail.match(/Run complete rc=(\d+)/);
         if (rcMatch && rcMatch[1] !== undefined) {
             var rc = parseInt(rcMatch[1], 10);
-            status = (rc === 0) ? "Completed" : "Failed";
+            if (rc === 0) {
+                status = "Completed";
+            } else if (rc === 130 || rc === 143) {
+                status = "Stopped";
+            } else {
+                status = "Failed";
+            }
             this._monitorEnabled = false;
         }
         if (this._paused) status = "Paused";
@@ -1450,44 +1608,88 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
     };
 
     STMPO_Controller.prototype.stop = function () {
-        var pid = this._runnerPid;
-        if (!pid) {
-            // Try refresh once before giving up.
-            try { this._pollConsoleOnce(); } catch (e0) {}
-            pid = this._runnerPid;
-        }
-        if (!pid) {
-            var pids = this._activeChildPids();
-            if (pids.length === 0) {
-                alert("No PID found to stop.");
-                return;
-            }
-            // Stop children only
-            try {
-                if (Utils.isWindows()) {
-                    for (var i = 0; i < pids.length; i++) system.callSystem("taskkill /PID " + pids[i] + " /F");
-                } else {
-                    system.callSystem("/bin/kill -TERM " + pids.join(" "));
-                }
-                this._paused = false;
-                this._setConsole("Stopping…", null, null);
-            } catch (e1) {
-                alert("Stop failed: " + e1.toString());
-            }
-            return;
-        }
-
-        // Prefer stopping the runner; it traps SIGTERM and cleans up children.
+        // Stop should not block the AE UI. We launch a detached stopper script that:
+        // 1) sends SIGTERM to the runner (graceful: lets Python kill its aerender children),
+        // 2) escalates to SIGKILL if needed,
+        // 3) as a final safety net, kills any child PIDs parsed from last_run.log.
         try {
+            var prefs = this.model.prefsFolder;
+            Utils.ensureFolder(prefs);
+
+            var pidFile = this.model.pidFile;
+            var logFile = this.model.logFile;
+
+            this._setConsole("Stopping…", null, "(sent stop request)\nLog: " + logFile.fsName);
+
             if (Utils.isWindows()) {
-                system.callSystem("taskkill /PID " + pid + " /T /F");
+                var stopCmd = new File(prefs.fsName + "/stop_last.cmd");
+
+                // Use PowerShell for robust PID extraction from log.
+                var ps = '';
+                ps += '$log=' + "'" + logFile.fsName.replace(/'/g, "''") + "'" + ';';
+                ps += 'if (Test-Path $log) {';
+                ps += "  $pids = (Select-String -Path $log -Pattern 'Launched child\[\d+\]\s+pid=(\d+)' -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique);";
+                ps += '  foreach($p in $pids){ try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch {} }';
+                ps += '}';
+
+                var body = '';
+                body += '@echo off\r\n';
+                body += 'setlocal EnableExtensions EnableDelayedExpansion\r\n';
+                body += 'set "PIDFILE=' + pidFile.fsName + '"\r\n';
+                body += 'set "LOGFILE=' + logFile.fsName + '"\r\n';
+                body += 'set "PID="\r\n';
+                body += 'if exist "%PIDFILE%" (\r\n';
+                body += '  for /f "usebackq delims=" %%A in ("%PIDFILE%") do set "PID=%%A"\r\n';
+                body += ')\r\n';
+                body += 'if not "%PID%"=="" (\r\n';
+                body += '  taskkill /PID %PID% /T >nul 2>&1\r\n';
+                body += '  ping 127.0.0.1 -n 3 >nul\r\n';
+                body += '  taskkill /PID %PID% /T /F >nul 2>&1\r\n';
+                body += ')\r\n';
+                body += 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' + ps.replace(/"/g, '\\"') + '" >nul 2>&1\r\n';
+                body += 'del "%PIDFILE%" >nul 2>&1\r\n';
+                body += 'endlocal\r\n';
+
+                Utils.writeFile(stopCmd, body);
+
+                // Detached
+                system.callSystem('cmd.exe /c start "" /b "' + stopCmd.fsName + '"');
             } else {
-                system.callSystem("/bin/kill -TERM " + pid);
+                var stopSh = new File(prefs.fsName + "/stop_last.sh");
+
+                var sh = '';
+                sh += '#!/bin/bash\n';
+                sh += 'PIDFILE=' + Utils.q(pidFile.fsName) + '\n';
+                sh += 'LOGFILE=' + Utils.q(logFile.fsName) + '\n';
+                sh += 'PID=""\n';
+                sh += 'if [ -f "$PIDFILE" ]; then PID=$(cat "$PIDFILE" 2>/dev/null | tr -d "\\r\\n"); fi\n';
+                sh += 'if [ -n "$PID" ]; then\n';
+                sh += '  /bin/kill -TERM "$PID" 2>/dev/null || true\n';
+                sh += '  for i in $(seq 1 40); do\n';
+                sh += '    /bin/kill -0 "$PID" 2>/dev/null || break\n';
+                sh += '    sleep 0.2\n';
+                sh += '  done\n';
+                sh += '  /bin/kill -KILL "$PID" 2>/dev/null || true\n';
+                sh += 'fi\n';
+                sh += 'if [ -f "$LOGFILE" ]; then\n';
+                sh += '  PIDS=$(grep -Eo "Launched child\\[[0-9]+\\]\\s+pid=[0-9]+" "$LOGFILE" 2>/dev/null | sed -E "s/.*pid=([0-9]+)/\\1/g" | sort -u)\n';
+                sh += '  for p in $PIDS; do /bin/kill -TERM "$p" 2>/dev/null || true; done\n';
+                sh += '  sleep 0.3\n';
+                sh += '  for p in $PIDS; do /bin/kill -KILL "$p" 2>/dev/null || true; done\n';
+                sh += 'fi\n';
+                sh += 'rm -f "$PIDFILE" 2>/dev/null || true\n';
+
+                Utils.writeFile(stopSh, sh);
+
+                // Detached
+                var cmd = '/bin/bash -lc ' + Utils.q('nohup /bin/bash ' + Utils.q(stopSh.fsName) + ' >/dev/null 2>&1 &');
+                system.callSystem(cmd);
             }
-            this._paused = false;
-            this._setConsole("Stopping…", null, null);
-        } catch (e2) {
-            alert("Stop failed: " + e2.toString());
+
+            // Keep monitoring briefly so the console reflects the shutdown.
+            this.startMonitor();
+        } catch (e) {
+            alert("Stop failed:\n" + e.toString());
         }
     };
 
@@ -1618,6 +1820,22 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
             var p = File.openDialog("Locate stmpo_local_render.py", "*.py", false);
             if (p) eRunner.text = p.fsName;
         };
+
+
+var rInstall = pPaths.add("group");
+rInstall.orientation = "row";
+rInstall.alignChildren = ["left", "center"];
+var bInstall = rInstall.add("button", undefined, "Install/Update Runner");
+bInstall.helpTip = "Copies the bundled Python runner (stmpo_local_render.py + stmpo/) next to this .jsx into your STMPO_LocalRunner preferences folder.";
+bInstall.onClick = function () {
+    var ok = model.installOrUpdateRunnerFromBundle();
+    if (ok) {
+        eRunner.text = model.state.runner_path;
+        alert("STMPO runner installed/updated in preferences.");
+    } else {
+        alert("Runner install failed. Ensure stmpo_local_render.py and the stmpo/ folder sit next to this .jsx file.");
+    }
+};
 
         var rPy = row(pPaths, "Python 3:");
         var ePy = rPy.add("edittext", undefined, s.python_path || "");
