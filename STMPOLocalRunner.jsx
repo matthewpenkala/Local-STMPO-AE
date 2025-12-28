@@ -30,7 +30,19 @@ Install (dockable panel):
     var Utils = {};
 
     Utils.isWindows = function () { return $.os.indexOf("Windows") !== -1; };
-    Utils.isMac = function () { return $.os.indexOf("Mac") !== -1; };
+Utils.isMac = function () { return $.os.indexOf("Mac") !== -1; };
+
+Utils.getPrefsFolder = function () {
+    if (Utils.isMac()) {
+        try {
+            var lib = Folder.userData.parent;
+            if (lib && lib.exists) {
+                return new Folder(lib.fsName + "/Application Support/STMPO_LocalRunner");
+            }
+        } catch (e) {}
+    }
+    return new Folder(Folder.userData.fsName + "/STMPO_LocalRunner");
+};
 
     Utils.trim = function (s) {
         if (s === null || s === undefined) return "";
@@ -403,8 +415,16 @@ Utils.removeTree = function (fileOrFolder) {
     // =========================================================================
     // Model
     // =========================================================================
-    function STMPO_Model() {
-        this.prefsFolder = new Folder(Folder.userData.fsName + "/STMPO_LocalRunner");
+function STMPO_Model() {
+        this.prefsFolder = Utils.getPrefsFolder();
+        if (Utils.isMac()) {
+            try {
+                var legacyPrefs = new Folder(Folder.userData.fsName + "/STMPO_LocalRunner");
+                if (legacyPrefs.exists && !this.prefsFolder.exists) {
+                    Utils.copyFolderRecursive(legacyPrefs, this.prefsFolder);
+                }
+            } catch (e) {}
+        }
         this.prefsFile = new File(this.prefsFolder.fsName + "/prefs_v240.json");
         // Read-only fallback sources for migration
         this.prefsFile_v2 = new File(this.prefsFolder.fsName + "/prefs_v2.json");
