@@ -20,9 +20,35 @@ This is a **local-only** fork of the STMPO (Single‑Task Multi‑Process Orches
 
 ### 1) Install dependencies
 
+Python dependencies (installed via pip):
+
 ```bash
 python -m pip install -r requirements.txt
 ```
+
+Optional system dependency: **FFmpeg** (only needed if you want **concurrency > 1** while writing a **single-file output** like `.mov` / `.mp4` / `.wav`)
+
+> `requirements.txt` is **Python-only**; FFmpeg is a **native executable**, so it’s installed via your OS package manager (or you can point to an existing binary).
+
+Install FFmpeg:
+
+- **macOS (Homebrew)**  
+  ```bash
+  brew install ffmpeg
+  ```
+- **Windows (winget)**  
+  ```powershell
+  winget install Gyan.FFmpeg
+  ```
+
+Verify it’s available:
+
+```bash
+ffmpeg -version
+```
+
+If FFmpeg isn’t on your `PATH`, set `FFMPEG` to an explicit executable path (e.g. `FFMPEG=/usr/local/bin/ffmpeg`).
+
 
 ### 2) Run a local segmented render
 
@@ -91,7 +117,7 @@ The offloader (scratch → final) works best with **sequence patterns**, e.g.:
 - Hash style: `shot_####.png`
 - printf style: `shot_%04d.png`
 
-If your output is a single file (mov/mp4/wav/etc), the runner prevents parallel writes by forcing concurrency=1.
+If your output is a single file (mov/mp4/wav/etc), the runner can still run concurrent `aerender` children by rendering per-range segment files and stitching them at the end with **FFmpeg**. If FFmpeg isn’t available, it safely falls back to concurrency=1 to avoid parallel write collisions.
 
 ---
 
