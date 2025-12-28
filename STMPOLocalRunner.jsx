@@ -1114,7 +1114,7 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         var cbBg = gAct.add("checkbox", undefined, "Background");
         cbBg.value = true;
         cbBg.enabled = false;
-        cbBg.helpTip = "Always runs detached to keep After Effects responsive. Use the Runner Console for pause/stop.";
+        cbBg.helpTip = "Always runs detached (background) so AE doesn't freeze.";
 
         var cbAudio = gAct.add("checkbox", undefined, "Audio");
         cbAudio.value = true;
@@ -1123,7 +1123,6 @@ if (Utils.trim(s.env_file)) args.push("--env_file", Utils.q(Utils.trim(s.env_fil
         // This panel always launches the runner detached to keep After Effects responsive.
         // Keep the control visible for clarity, but disable toggling.
         cbBg.enabled = false;
-        cbBg.helpTip = "Always runs detached (background) so AE doesn't freeze.";
 
         var bLog = gAct.add("button", undefined, "Open Log");
         bLog.preferredSize = [90, 28];
