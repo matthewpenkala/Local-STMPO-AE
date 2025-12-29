@@ -1,6 +1,6 @@
 # STMPO Local Debug Runner for After Effects (aerender)
 
-This is a **local-only** fork of the STMPO (Single‑Task Multi‑Process Orchestrator) concept for Adobe After Effects.
+This is a **local-only** fork of [the STMPO (Single‑Task Multi‑Process Orchestrator)](https://github.com/matthewpenkala/AE2024) concept for Adobe After Effects.
 
 **Goal:** run the exact “segmented / parallel `aerender`” approach **on your current machine** for debugging and test iteration—**no AWS Deadline Cloud**, no worker fleets, no submitter UI, no templates.
 
